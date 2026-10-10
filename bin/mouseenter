@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Aerox mouse buttons read directly from the device:
-#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T; hold + wheel-click = close application windows
+#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T; hold + wheel-click = close application windows; hold + double wheel-click = lock computer
 #   Button 4 (BTN_SIDE or F16): tap = keyboard on, double = Super (toggle Activities)
 #   Button 5 (BTN_EXTRA or F17): tap = keyboard off, double = previous window,
 #                  hold = show performance overlay, release = hide it
@@ -397,7 +397,8 @@ launcher_right = False
 launcher_left_armed = False
 button9_down = button9_used = button9_left = button9_right = False
 button9_reopen_count = 0
-button9_middle = button9_close_requested = False
+button9_middle = button9_close_requested = button9_lock_requested = False
+button9_middle_last_click = None
 overlay_left_action = None
 last_click = {e.BTN_LEFT: 0, e.BTN_RIGHT: 0}
 def window_under_pointer():
@@ -426,14 +427,21 @@ def handle_mouse_button(code, value):
     global activities_last_click, activities_left_armed, activities_combo_used
     global launcher_right, launcher_left_armed
     global button9_down, button9_used, button9_left, button9_right, button9_reopen_count
-    global button9_middle, button9_close_requested
+    global button9_middle, button9_close_requested, button9_lock_requested, button9_middle_last_click
     if code == e.BTN_MIDDLE and (button9_down or button9_middle):
         if value == 1 and button9_down:
             button9_middle = button9_used = True
-            # One close-applications action per hold, even after repeated wheel clicks.
-            button9_close_requested = True
+            now = time.monotonic()
+            if button9_middle_last_click is not None and now - button9_middle_last_click <= WINDOWS_TAP_WINDOW:
+                button9_lock_requested = True
+                button9_close_requested = False
+                input_trace('button9-double-middle lock queued')
+            elif not button9_lock_requested:
+                button9_close_requested = True
+            button9_middle_last_click = now
             pending.pop(e.KEY_F3, None)
-            input_trace('button9-middle close-applications queued')
+            if button9_close_requested:
+                input_trace('button9-middle close-applications queued')
         elif value == 0:
             button9_middle = False
         return True
@@ -632,7 +640,8 @@ while True:
                             input_trace('button9-press')
                             button9_down, button9_used = True, False
                             button9_reopen_count = 0
-                            button9_close_requested = False
+                            button9_close_requested = button9_lock_requested = False
+                            button9_middle_last_click = None
                             left_capture.set_grab(True)
                             left_capture.set_middle(True)
                             continue
@@ -642,7 +651,13 @@ while True:
                             left_capture.set_middle(False)
                             if down_at is None:
                                 left_capture.set_grab(False)
-                            if button9_close_requested:
+                            if button9_lock_requested:
+                                run(['gdbus', 'call', '--session', '--dest', 'org.gnome.ScreenSaver',
+                                     '--object-path', '/org/gnome/ScreenSaver', '--method', 'org.gnome.ScreenSaver.Lock'])
+                                input_trace('button9-double-middle lock dispatched')
+                                button9_lock_requested = button9_close_requested = False
+                                button9_reopen_count = 0
+                            elif button9_close_requested:
                                 close_application_windows()
                                 button9_close_requested = False
                                 button9_reopen_count = 0
@@ -732,7 +747,8 @@ while True:
         left_down = left_chord = right_chord = False
         button9_down = button9_used = button9_left = button9_right = False
         button9_reopen_count = 0
-        button9_middle = button9_close_requested = False
+        button9_middle = button9_close_requested = button9_lock_requested = False
+        button9_middle_last_click = None
         overlay_left_action = None
         windows_second_press = False
         for d in devs:

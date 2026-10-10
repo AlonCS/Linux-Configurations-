@@ -35,6 +35,7 @@ The diagram identifies the physical buttons. These numbers differ from Linux/X11
 | Hold Button 9 + Button 1 | Minimize the window under the pointer, including an inactive window |
 | Hold Button 9 + Button 2, then release Button 9 | Ctrl+Shift+T: reopen a closed tab in the active browser |
 | Hold Button 9 + Button 3 (wheel-click), then release Button 9 | Request normal close once per window; protect windows that remain open |
+| Hold Button 9 + double-click Button 3, then release Button 9 | Lock the computer; overrides the single-click close action |
 | Hold Button 1 + tap Button 2 | Alt+Tab |
 | Double left/right-click without a held modifier button | Switch workspace left/right |
 
@@ -139,3 +140,5 @@ bash system/bluetooth-startup/uninstall.sh
 - **Bluetooth battery unavailable:** disconnected devices do not provide a guaranteed current battery reading. GPU/battery support varies by device; stored readings are not evidence of a live connection.
 
 Useful local logs: `~/.cache/mouse-keyboard-actions.log`, `~/.cache/mouseenter.log`, `~/.cache/conky_bt_toggle.log`, and `~/.cache/conky_bt_navigation.log`. Runtime logs and battery caches are not part of this repository.
+
+The Button 9 + double wheel-click lock gesture uses a 0.4-second double-click interval and the GNOME ScreenSaver D-Bus Lock method. It dispatches on Button 9 release after mouse grabs are released.
