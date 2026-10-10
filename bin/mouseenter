@@ -280,10 +280,30 @@ def close_application_windows():
             continue
         targets.append(window_id)
     time.sleep(0.10)
+    requested = 0
     for window_id in targets:
-        # wmctrl sends WM_DELETE_WINDOW, allowing each app to ask about unsaved work.
-        run(['wmctrl', '-ic', window_id])
-    input_trace(f'button9-middle close-applications requested count={len(targets)}')
+        # Send one normal close request, then wait for that window to disappear.
+        # A browser before-unload prompt keeps the window open: never send
+        # another request or advance to another window of the same application.
+        result = subprocess.run(['wmctrl', '-ic', window_id],
+                                capture_output=True, text=True)
+        if result.returncode:
+            continue
+        requested += 1
+        deadline = time.monotonic() + 2.0
+        while True:
+            current = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
+            remaining = {int(line.split()[0], 16) for line in current.stdout.splitlines()
+                         if line.split() and re.fullmatch(r'0x[0-9a-fA-F]+', line.split()[0])}
+            if current.returncode:
+                return
+            if int(window_id, 16) not in remaining:
+                break
+            if time.monotonic() >= deadline:
+                input_trace('button9-middle close-applications stopped: window still open; awaiting user')
+                return
+            time.sleep(0.10)
+    input_trace(f'button9-middle close-applications requested count={requested}')
 
 def quick_switch():
     w = recent_windows()
