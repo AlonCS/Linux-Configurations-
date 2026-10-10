@@ -34,10 +34,11 @@ The diagram identifies the physical buttons. These numbers differ from Linux/X11
 | Button 9: double-tap | Print Screen |
 | Hold Button 9 + Button 1 | Minimize the window under the pointer, including an inactive window |
 | Hold Button 9 + Button 2, then release Button 9 | Ctrl+Shift+T: reopen a closed tab in the active browser |
+| Hold Button 9 + Button 3 (wheel-click), then release Button 9 | Ctrl+Shift+W: close the current browser window and all its tabs; one close action per hold |
 | Hold Button 1 + tap Button 2 | Alt+Tab |
 | Double left/right-click without a held modifier button | Switch workspace left/right |
 
-Button 9's reopen-tab action waits until release because the F3 binding in xbindkeys captures the keyboard while held. It sends the shortcut after an additional 0.1 seconds.
+Button 9's reopen-tab and close-tabs actions wait until release because the F3 binding in xbindkeys captures the keyboard while held. It sends the shortcut after an additional 0.1 seconds.
 
 The tested mouse profile uses Button 4 = F16, Button 5 = F17, Button 7 = F18, Button 8 = disabled, and Button 9 = F3. The event handler also accepts native BTN_SIDE/BTN_EXTRA for Buttons 4/5. Firmware mappings can differ across connection modes; verify the events before changing shortcuts.
 

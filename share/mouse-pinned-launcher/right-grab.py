@@ -39,3 +39,12 @@ def set_grab(enabled):
         x.XUngrabButton(display,3,1<<15,root)
         x.XUngrabPointer(display,0)
     x.XSync(display,True)
+
+
+def set_middle(enabled):
+    # Capture native wheel clicks only during a Button 9 hold.
+    if enabled:
+        x.XGrabButton(display,2,1<<15,root,False,(1<<2)|(1<<3),1,1,0,0)
+    else:
+        x.XUngrabButton(display,2,1<<15,root)
+    x.XSync(display,True)

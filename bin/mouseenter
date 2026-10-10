@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Aerox mouse buttons read directly from the device:
-#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T
+#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T; hold + wheel-click = Ctrl+Shift+W
 #   Button 4 (BTN_SIDE or F16): tap = keyboard on, double = Super (toggle Activities)
 #   Button 5 (BTN_EXTRA or F17): tap = keyboard off, double = previous window,
 #                  hold = show performance overlay, release = hide it
@@ -328,6 +328,7 @@ launcher_right = False
 launcher_left_armed = False
 button9_down = button9_used = button9_left = button9_right = False
 button9_reopen_count = 0
+button9_middle = button9_close_requested = False
 overlay_left_action = None
 last_click = {e.BTN_LEFT: 0, e.BTN_RIGHT: 0}
 def window_under_pointer():
@@ -356,6 +357,17 @@ def handle_mouse_button(code, value):
     global activities_last_click, activities_left_armed, activities_combo_used
     global launcher_right, launcher_left_armed
     global button9_down, button9_used, button9_left, button9_right, button9_reopen_count
+    global button9_middle, button9_close_requested
+    if code == e.BTN_MIDDLE and (button9_down or button9_middle):
+        if value == 1 and button9_down:
+            button9_middle = button9_used = True
+            # One close-window action per hold, even after repeated wheel clicks.
+            button9_close_requested = True
+            pending.pop(e.KEY_F3, None)
+            input_trace('button9-middle close-tabs queued')
+        elif value == 0:
+            button9_middle = False
+        return True
     global overlay_left_action
     if code == e.BTN_LEFT:
         if value == 1 and down_at is not None:
@@ -551,14 +563,22 @@ while True:
                             input_trace('button9-press')
                             button9_down, button9_used = True, False
                             button9_reopen_count = 0
+                            button9_close_requested = False
                             left_capture.set_grab(True)
+                            left_capture.set_middle(True)
                             continue
                         if ev.value == 0:
                             input_trace('button9-release')
                             button9_down = False
+                            left_capture.set_middle(False)
                             if down_at is None:
                                 left_capture.set_grab(False)
-                            if button9_reopen_count:
+                            if button9_close_requested:
+                                run(['xdotool', 'sleep', '0.10', 'key', '--clearmodifiers', 'ctrl+shift+w'])
+                                input_trace('button9-middle close-tabs dispatched')
+                                button9_close_requested = False
+                                button9_reopen_count = 0
+                            elif button9_reopen_count:
                                 command = ['xdotool']
                                 for _ in range(button9_reopen_count):
                                     command += ['sleep', '0.10', 'key', '--clearmodifiers', 'ctrl+shift+t']
@@ -625,6 +645,7 @@ while True:
     except OSError:
         pass
     finally:
+        left_capture.set_middle(False)
         left_capture.set_grab(False)
         launcher_finish(commit=False)
         launcher_requested = launcher_right = launcher_left_armed = False
@@ -643,6 +664,7 @@ while True:
         left_down = left_chord = right_chord = False
         button9_down = button9_used = button9_left = button9_right = False
         button9_reopen_count = 0
+        button9_middle = button9_close_requested = False
         overlay_left_action = None
         windows_second_press = False
         for d in devs:
