@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Aerox mouse buttons read directly from the device:
-#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T; hold + wheel-click = Ctrl+Shift+W
+#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T; hold + wheel-click = close application windows
 #   Button 4 (BTN_SIDE or F16): tap = keyboard on, double = Super (toggle Activities)
 #   Button 5 (BTN_EXTRA or F17): tap = keyboard off, double = previous window,
 #                  hold = show performance overlay, release = hide it
@@ -262,6 +262,29 @@ def hold_end():
         overlay_proc.terminate()
         overlay_proc = None
 
+def close_application_windows():
+    # Snapshot normal application windows first. Never close newly opened
+    # save/confirmation dialogs and never send force-kill signals.
+    listing = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
+    targets = []
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 3 or not re.fullmatch(r'0x[0-9a-fA-F]+', parts[0]):
+            continue
+        window_id, window_class = parts[0], parts[2].lower()
+        if 'conky' in window_class or 'mousepinnedlauncher' in window_class or 'mouse-pinned-launcher' in window_class:
+            continue
+        kind = subprocess.run(['xprop', '-id', window_id, '_NET_WM_WINDOW_TYPE'],
+                              capture_output=True, text=True)
+        if kind.returncode or '_NET_WM_WINDOW_TYPE_NORMAL' not in kind.stdout or '_NET_WM_WINDOW_TYPE_DIALOG' in kind.stdout:
+            continue
+        targets.append(window_id)
+    time.sleep(0.10)
+    for window_id in targets:
+        # wmctrl sends WM_DELETE_WINDOW, allowing each app to ask about unsaved work.
+        run(['wmctrl', '-ic', window_id])
+    input_trace(f'button9-middle close-applications requested count={len(targets)}')
+
 def quick_switch():
     w = recent_windows()
     if len(w) > 1:
@@ -361,10 +384,10 @@ def handle_mouse_button(code, value):
     if code == e.BTN_MIDDLE and (button9_down or button9_middle):
         if value == 1 and button9_down:
             button9_middle = button9_used = True
-            # One close-window action per hold, even after repeated wheel clicks.
+            # One close-applications action per hold, even after repeated wheel clicks.
             button9_close_requested = True
             pending.pop(e.KEY_F3, None)
-            input_trace('button9-middle close-tabs queued')
+            input_trace('button9-middle close-applications queued')
         elif value == 0:
             button9_middle = False
         return True
@@ -574,8 +597,7 @@ while True:
                             if down_at is None:
                                 left_capture.set_grab(False)
                             if button9_close_requested:
-                                run(['xdotool', 'sleep', '0.10', 'key', '--clearmodifiers', 'ctrl+shift+w'])
-                                input_trace('button9-middle close-tabs dispatched')
+                                close_application_windows()
                                 button9_close_requested = False
                                 button9_reopen_count = 0
                             elif button9_reopen_count:
