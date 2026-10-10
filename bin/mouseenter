@@ -262,9 +262,54 @@ def hold_end():
         overlay_proc.terminate()
         overlay_proc = None
 
+# Windows that ignored a close request are protected until they disappear.
+close_protected_windows = {}
+
 def close_application_windows():
-    # Disabled: applications can discard unsaved work on normal close requests.
-    input_trace('button9-middle close-applications disabled: preserve unsaved work')
+    listing = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
+    if listing.returncode:
+        return
+    windows = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) >= 3 and re.fullmatch(r'0x[0-9a-fA-F]+', parts[0]):
+            windows[int(parts[0], 16)] = (parts[0], parts[2].lower())
+    for wid in list(close_protected_windows):
+        if wid not in windows:
+            del close_protected_windows[wid]
+    blocked_classes = set(close_protected_windows.values())
+    requested = 0
+    for wid, (window_id, window_class) in windows.items():
+        if wid in close_protected_windows or window_class in blocked_classes:
+            continue
+        if any(name in window_class for name in ('conky', 'mousepinnedlauncher', 'mouse-pinned-launcher')):
+            continue
+        kind = subprocess.run(['xprop', '-id', window_id, '_NET_WM_WINDOW_TYPE'], capture_output=True, text=True)
+        if kind.returncode or '_NET_WM_WINDOW_TYPE_NORMAL' not in kind.stdout or '_NET_WM_WINDOW_TYPE_DIALOG' in kind.stdout:
+            continue
+        # Protect before sending: later gestures must never repeat this request.
+        close_protected_windows[wid] = window_class
+        result = subprocess.run(['wmctrl', '-ic', window_id], capture_output=True, text=True)
+        if result.returncode:
+            blocked_classes.add(window_class)
+            continue
+        requested += 1
+        deadline = time.monotonic() + 2.0
+        while True:
+            current = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
+            remaining = {int(line.split()[0], 16) for line in current.stdout.splitlines()
+                         if line.split() and re.fullmatch(r'0x[0-9a-fA-F]+', line.split()[0])}
+            if current.returncode:
+                return
+            if wid not in remaining:
+                del close_protected_windows[wid]
+                break
+            if time.monotonic() >= deadline:
+                blocked_classes.add(window_class)
+                input_trace(f'close-all protected window={window_id}; no repeat requests')
+                break
+            time.sleep(0.10)
+    input_trace(f'button9-middle close-applications requested count={requested}')
 
 
 def quick_switch():
