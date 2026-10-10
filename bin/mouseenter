@@ -296,9 +296,14 @@ def close_application_windows():
     blocked_classes = set(close_protected_windows.values())
     requested = 0
     for wid, (window_id, window_class) in windows.items():
-        if 'chrome' in window_class and chrome_close_state() != 'clear':
-            input_trace('close-all skipped Chrome: dialog open or accessibility unavailable')
-            continue
+        if 'chrome' in window_class:
+            state = chrome_close_state()
+            if state == 'blocked' or (state == 'unknown' and
+                    (wid in close_protected_windows or window_class in blocked_classes)):
+                input_trace('close-all skipped Chrome: dialog open or retained window cannot be checked')
+                continue
+            # Without accessibility, allow only the first request for this window.
+            # Retained windows remain protected until a clear dialog check succeeds.
         if wid in close_protected_windows or window_class in blocked_classes:
             continue
         if any(name in window_class for name in ('conky', 'mousepinnedlauncher', 'mouse-pinned-launcher')):
