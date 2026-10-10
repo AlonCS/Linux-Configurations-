@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+# Aerox mouse buttons read directly from the device:
+#   Button 9 (F3): tap = Enter, double = Print Screen; hold + left-click = minimize window under pointer; hold + right-click = Ctrl+Shift+T
+#   Button 4 (BTN_SIDE or F16): tap = keyboard on, double = Super (toggle Activities)
+#   Button 5 (BTN_EXTRA or F17): tap = keyboard off, double = previous window,
+#                  hold = show performance overlay, release = hide it
+#   Hold Button 5 + double right-click: toggle GNOME Activities
+#   Hold Button 5 + left-click: centered app dock; left-click cycles;
+#   release Button 5 launches selection; right-click outside cancels the dock.
+#   Button 7 (F18): press = Print Screen
+#   Hold left + tap right = Alt+Tab; ordinary left clicks never press Alt
+#   Double-click left/right (not held) = switch workspace left/right (right-most is typically empty = clean slate)
+#   Left + right click together: Terminator split/open -- disabled for now, see CHORD_CMD below
+import evdev, select, subprocess, time, re, os, fcntl, sys, signal
+from evdev import ecodes as e
+
+# Multiple autostart/reload loops must never inject each shortcut twice.
+lock_dir = os.path.expanduser('~/.cache')
+os.makedirs(lock_dir, exist_ok=True)
+mouse_instance_lock = open(os.path.join(lock_dir, 'mouseenter.lock'), 'a+')
+try:
+    fcntl.flock(mouse_instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(0)
+
+def stop_mouse_handler(signum, frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop_mouse_handler)
+
+# Capture clicks only during Button 5 holds, so the gesture doesn't
+# click through to an application. Always release active grabs on cleanup.
+import importlib.util
+_capture_spec = importlib.util.spec_from_file_location(
+    'mouse_left_capture', os.path.expanduser('~/.local/share/mouse-pinned-launcher/right-grab.py'))
+left_capture = importlib.util.module_from_spec(_capture_spec)
+_capture_spec.loader.exec_module(left_capture)
+
+WINDOW, HOLD_DELAY, HOLD_RATE = 0.25, 0.2, 0.4
+WINDOWS_TAP_WINDOW = 0.4
+windows_second_press = False
+
+def windows_log(action):
+    with open(os.path.join(lock_dir, 'mouse-windows-events.log'), 'a') as log:
+        log.write(f'{time.time():.3f} pid={os.getpid()} {action}\n')
+# CHORD = 0.2  # max gap between left and right press to count as "together" -- disabled, see below
+KB_ON  = "xinput enable 'AT Translated Set 2 keyboard'; xinput enable 'keyd virtual keyboard'"
+KB_OFF = "xinput disable 'AT Translated Set 2 keyboard'; xinput disable 'keyd virtual keyboard'"
+ACTIONS = {
+    e.KEY_F3:  (["xdotool", "key", "--clearmodifiers", "Return"],
+                ["xdotool", "key", "--clearmodifiers", "Print"]),
+    e.KEY_F16: (["sh", "-c", KB_ON],
+                ["xdotool", "key", "--clearmodifiers", "Super_L"]),
+    e.KEY_F17: (["sh", "-c", KB_OFF],
+                ["xdotool", "key", "--clearmodifiers", "alt+Tab"]),
+    e.KEY_F18: (["xdotool", "key", "--clearmodifiers", "Print"],
+                ["xdotool", "key", "--clearmodifiers", "Print"]),
+}
+HOLD_KEY = e.KEY_F17
+# Normalize native Aerox side buttons to their existing shortcut actions.
+# Only devices selected by find_devices() reach this mapping.
+BUTTON_ALIASES = {e.BTN_EXTRA: e.KEY_F17, e.BTN_SIDE: e.KEY_F16}
+# CHORD_CMD = ["sh", "-c", "xdotool key Escape; sleep 0.1; /home/lonzo/bin/smartsplit"]  # disabled, free for a future button
+
+try:
+    ui = evdev.UInput({e.EV_KEY: [e.KEY_LEFTALT, e.KEY_TAB, e.KEY_LEFTSHIFT, e.KEY_LEFTMETA]},
+                      name="mouseenter virtual keyboard", vendor=0x1234, product=0x5678)
+    time.sleep(0.5)
+except Exception:
+    ui = None
+
+def run(cmd):
+    subprocess.Popen(cmd)
+
+def set_keyboard(enabled, source):
+    action = "enable" if enabled else "disable"
+    names = ("AT Translated Set 2 keyboard", "keyd virtual keyboard")
+    results = []
+    for name in names:
+        try:
+            result = subprocess.run(["xinput", action, name], capture_output=True,
+                                    text=True, timeout=3)
+            detail = (result.stderr or result.stdout).strip()
+            results.append(f"{name}: exit={result.returncode} {detail}".rstrip())
+        except Exception as exc:
+            results.append(f"{name}: {type(exc).__name__}: {exc}")
+    with open(os.path.join(lock_dir, 'mouse-keyboard-actions.log'), 'a') as log:
+        log.write(f"{time.time():.3f} {source} {'; '.join(results)}\n")
+
+def input_trace(message):
+    with open(os.path.join(lock_dir, 'mouse-keyboard-actions.log'), 'a') as log:
+        log.write(f"{time.time():.3f} pid={os.getpid()} {message}\n")
+
+def vkey(code, value):
+    ui.write(e.EV_KEY, code, value); ui.syn()
+
+def mouse_windows():
+    windows_log('open-activities' if ui else 'open-activities-xdotool-fallback')
+    if ui is None:
+        run(ACTIONS[e.KEY_F16][1])
+        return
+    try:
+        vkey(e.KEY_LEFTMETA, 1)
+        time.sleep(0.03)
+    finally:
+        vkey(e.KEY_LEFTMETA, 0)
+
+def toggle_activities():
+    base = ['gdbus', 'call', '--session', '--dest', 'org.gnome.Shell',
+            '--object-path', '/org/gnome/Shell']
+    try:
+        result = subprocess.run(base + ['--method', 'org.freedesktop.DBus.Properties.Get',
+            'org.gnome.Shell', 'OverviewActive'], capture_output=True, text=True, timeout=2)
+        if result.returncode or result.stdout.strip() not in ('(<true>,)', '(<false>,)'):
+            input_trace('activities-read-error ' + (result.stderr or result.stdout).strip())
+            return
+        target = '<false>' if '<true>' in result.stdout else '<true>'
+        result = subprocess.run(base + ['--method', 'org.freedesktop.DBus.Properties.Set',
+            'org.gnome.Shell', 'OverviewActive', target], capture_output=True, text=True, timeout=2)
+        input_trace(f'button5-double-right activities={target} exit={result.returncode}')
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        input_trace(f'activities-error {exc}')
+
+def double_action(code):
+    if code == HOLD_KEY:
+        quick_switch()
+    elif code == e.KEY_F16:
+        mouse_windows()
+    else:
+        run(ACTIONS[code][1])
+
+def handle_windows_button(value):
+    global windows_second_press
+    windows_log('press' if value == 1 else 'release')
+    if value == 1:
+        # The second press determines the double tap, not its release time.
+        if e.KEY_F16 in pending and time.time() <= pending[e.KEY_F16]:
+            del pending[e.KEY_F16]
+            windows_second_press = True
+        return True
+    if windows_second_press:
+        windows_second_press = False
+        mouse_windows()
+        return True
+    return False
+
+def tab(back=False):
+    if back: vkey(e.KEY_LEFTSHIFT, 1)
+    vkey(e.KEY_TAB, 1); time.sleep(0.02); vkey(e.KEY_TAB, 0)
+    if back: vkey(e.KEY_LEFTSHIFT, 0)
+
+def recent_windows():
+    out = subprocess.run(["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
+                         capture_output=True, text=True).stdout
+    stack = [int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", out)]
+    valid = set()
+    for line in subprocess.run(["wmctrl", "-l"], capture_output=True, text=True).stdout.splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1] != "-1":
+            valid.add(int(parts[0], 16))
+    return [w for w in reversed(stack) if w in valid]
+
+def activate(win):
+    subprocess.run(["wmctrl", "-i", "-a", hex(win)])
+
+OVERLAY_CONF = "/home/lonzo/.config/conky/overlay.conf"
+overlay_proc = None
+launcher_proc = None
+launcher_log = None
+
+def launcher_next():
+    global launcher_proc, launcher_log, launcher_requested
+    if not launcher_requested:
+        launcher_requested = True
+        path = os.path.expanduser('~/.local/share/mouse-pinned-launcher/launcher.py')
+        launcher_log = open(os.path.expanduser('~/.local/share/mouse-pinned-launcher/launcher.log'), 'a')
+        try:
+            launcher_proc = subprocess.Popen([sys.executable, path, '--switcher', '--external-clicks'],
+                stdin=subprocess.PIPE, stdout=launcher_log, stderr=launcher_log, text=True)
+        except OSError as exc:
+            input_trace(f'launcher-start-error {exc}')
+            launcher_log.close()
+            launcher_log = None
+    launcher_send('next')
+
+def launcher_send(message):
+    if launcher_proc is not None and launcher_proc.poll() is None:
+        try:
+            launcher_proc.stdin.write(message + '\n')
+            launcher_proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+def launcher_finish(commit=False):
+    global launcher_proc, launcher_log
+    launcher_send('commit' if commit else 'cancel')
+    if launcher_proc is not None:
+        try:
+            launcher_proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        launcher_proc = None
+    if launcher_log is not None:
+        launcher_log.close()
+        launcher_log = None
+
+def hold_start():
+    global overlay_proc
+    if overlay_proc is None:
+        overlay_proc = subprocess.Popen(["conky", "-c", OVERLAY_CONF])
+
+def overlay_hit():
+    if overlay_proc is None or overlay_proc.poll() is not None:
+        return None
+    position = left_capture.pointer_position()
+    if position is None:
+        return None
+    windows = subprocess.run(['xdotool', 'search', '--onlyvisible', '--pid',
+                              str(overlay_proc.pid), '--class', 'conky-overlay'],
+                             capture_output=True, text=True, timeout=2)
+    for window_id in windows.stdout.split():
+        geometry = subprocess.run(['xdotool', 'getwindowgeometry', '--shell', window_id],
+                                  capture_output=True, text=True, timeout=2)
+        values = dict(re.findall(r'^(X|Y|WIDTH|HEIGHT)=(-?\d+)$',
+                                 geometry.stdout, re.MULTILINE))
+        if geometry.returncode or len(values) != 4:
+            continue
+        x, y, width, height = (int(values[key]) for key in ('X', 'Y', 'WIDTH', 'HEIGHT'))
+        px, py = position
+        if x <= px < x + width and y <= py < y + height:
+            top = 506
+            try:
+                with open('/tmp/conky_bt_layout.overlay.tsv') as layout:
+                    top = int(layout.readline().split('\t')[0]) - 60
+            except (OSError, ValueError):
+                pass
+            if top <= py - y < top + 60:
+                return ('bluetooth', '')
+            try:
+                with open('/tmp/conky_bt_layout.overlay.tsv') as layout:
+                    for line in layout:
+                        fields = line.rstrip('\n').split('\t')
+                        if len(fields) != 8:
+                            continue
+                        y0, y1, name, mac, connected, sx0, sx1, nx1 = fields
+                        if int(y0) + 14 <= py - y < int(y0) + 40:
+                            if int(sx0) <= px - x <= int(sx1):
+                                return ('toggle', mac)
+                            if 4 <= px - x <= int(nx1):
+                                return ('device', name)
+            except (OSError, ValueError):
+                pass
+            return 'passive' 
+    return None
+
+def hold_step(back=False):
+    pass
+
+def hold_end():
+    global overlay_proc
+    if overlay_proc is not None:
+        overlay_proc.terminate()
+        overlay_proc = None
+
+def quick_switch():
+    w = recent_windows()
+    if len(w) > 1:
+        activate(w[1])
+
+def switch_workspace(direction):
+    subprocess.run(["xdotool", "key", "super+Page_Down" if direction == "right" else "super+Page_Up"])
+
+def disable_native_right_click():
+    # evdev still receives BTN_RIGHT for dock and workspace shortcuts.
+    # Suppress only the native X11 right-click delivered to applications.
+    try:
+        result = subprocess.run(['xinput', 'list', '--short'],
+                                capture_output=True, text=True, timeout=2)
+        # Bluetooth and USB use different names; match all Aerox pointers.
+        device_ids = [match.group(1) for line in result.stdout.splitlines()
+                      if 'Aerox' in line and 'slave  pointer' in line
+                      for match in [re.search(r'id=(\d+)', line)] if match]
+        for device_id in device_ids:
+            mapping = subprocess.run(['xinput', 'get-button-map', device_id],
+                                     capture_output=True, text=True, timeout=2)
+            buttons = mapping.stdout.split()
+            if mapping.returncode == 0 and len(buttons) >= 3 and buttons[2] != '0':
+                buttons[2] = '0'
+                subprocess.run(['xinput', 'set-button-map', device_id, *buttons],
+                               capture_output=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+last_device_scan = None
+def find_devices():
+    global last_device_scan
+    disable_native_right_click()
+    devs = []
+    for p in evdev.list_devices():
+        try:
+            d = evdev.InputDevice(p)
+            caps = d.capabilities()
+            has_keys = any(k in caps.get(e.EV_KEY, []) for k in (*ACTIONS, *BUTTON_ALIASES))
+            has_wheel = e.REL_WHEEL in caps.get(e.EV_REL, [])
+            if "Aerox" in d.name and (has_keys or has_wheel):
+                devs.append(d)
+            else:
+                d.close()
+        except OSError as exc:
+            input_trace(f"device-open-error {p}: {exc}")
+    scan = ", ".join(f"{d.path}:{d.name}" for d in devs) or "no matching devices"
+    if scan != last_device_scan:
+        input_trace(f"device-scan {scan}")
+        last_device_scan = scan
+    return devs
+
+pending, down_at, holding, manual = {}, None, False, False
+order, idx, next_step = [], 0, 0
+alt_held = False
+left_down = False
+left_chord = False
+right_chord = False
+activities_last_click = None
+activities_left_armed = False
+activities_combo_used = False
+launcher_requested = False
+launcher_right = False
+launcher_left_armed = False
+button9_down = button9_used = button9_left = button9_right = False
+button9_reopen_count = 0
+overlay_left_action = None
+last_click = {e.BTN_LEFT: 0, e.BTN_RIGHT: 0}
+def window_under_pointer():
+    location = subprocess.run(['xdotool', 'getmouselocation', '--shell'],
+                              capture_output=True, text=True)
+    match = re.search(r'^WINDOW=(\d+)$', location.stdout, re.MULTILINE)
+    if location.returncode or not match:
+        return None
+    pointer_window = int(match.group(1))
+    clients = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
+    ids = {int(line.split()[0], 16) for line in clients.stdout.splitlines()
+           if line.split() and re.fullmatch(r'0x[0-9a-fA-F]+', line.split()[0])}
+    if pointer_window in ids:
+        return pointer_window
+    # X11 may report the window manager's frame instead of the client.
+    tree = subprocess.run(['xwininfo', '-id', str(pointer_window), '-tree'],
+                          capture_output=True, text=True)
+    for candidate in re.findall(r'^\s*(0x[0-9a-fA-F]+)\s', tree.stdout, re.MULTILINE):
+        client = int(candidate, 16)
+        if client in ids:
+            return client
+    return None
+
+def handle_mouse_button(code, value):
+    global left_down, alt_held, left_chord, right_chord, holding, manual
+    global activities_last_click, activities_left_armed, activities_combo_used
+    global launcher_right, launcher_left_armed
+    global button9_down, button9_used, button9_left, button9_right, button9_reopen_count
+    global overlay_left_action
+    if code == e.BTN_LEFT:
+        if value == 1 and down_at is not None:
+            try:
+                overlay_left_action = overlay_hit()
+            except (OSError, subprocess.TimeoutExpired):
+                overlay_left_action = None
+        if overlay_left_action is not None:
+            last_click[e.BTN_LEFT] = 0
+            left_down = False
+            left_chord = True
+            if value == 0:
+                action, overlay_left_action = overlay_left_action, None
+                if isinstance(action, tuple) and down_at is not None:
+                    kind, target = action
+                    if kind in ('bluetooth', 'device'):
+                        run(['/home/lonzo/.config/conky/open_bt_device.sh', target])
+                    elif kind == 'toggle':
+                        run(['/home/lonzo/.config/conky/toggle_bt_device.sh', target])
+                    input_trace(f'overlay-bluetooth {kind} {target}')
+            return True
+    if code == e.BTN_RIGHT and (button9_down or button9_right):
+        last_click[e.BTN_RIGHT] = 0
+        right_chord = False
+        if value == 1 and button9_down:
+            button9_right = button9_used = True
+            pending.pop(e.KEY_F3, None)
+            # F3 has an xbindkeys passive keyboard grab until release.
+            button9_reopen_count += 1
+            input_trace('button9-right reopen-tab queued')
+        elif value == 0:
+            button9_right = False
+        return True
+    if code == e.BTN_LEFT and (button9_down or button9_left):
+        last_click[e.BTN_LEFT] = 0
+        left_down = False
+        left_chord = True
+        if value == 1 and button9_down:
+            button9_left = button9_used = True
+            pending.pop(e.KEY_F3, None)
+            window_id = window_under_pointer()
+            if window_id is not None:
+                run(['xdotool', 'windowminimize', str(window_id)])
+        elif value == 0:
+            button9_left = False
+        return True
+    if code == e.BTN_LEFT and (down_at is not None or launcher_right):
+        last_click[e.BTN_LEFT] = 0
+        right_chord = False
+        if value == 1 and down_at is not None:
+            launcher_right = True
+            holding, manual = True, True
+            activities_last_click = None
+            activities_left_armed = False
+            pending.pop(HOLD_KEY, None)
+            hold_end()
+            launcher_next()
+        elif value == 0:
+            launcher_right = False
+        return True
+    if code == e.BTN_RIGHT and ((launcher_requested and down_at is not None) or launcher_left_armed):
+        last_click[e.BTN_RIGHT] = 0
+        left_down = False
+        left_chord = True
+        if value == 1 and down_at is not None:
+            launcher_left_armed = True
+        elif value == 0 and launcher_left_armed:
+            launcher_left_armed = False
+            if down_at is not None:
+                pos = left_capture.pointer_position()
+                if pos is not None:
+                    launcher_send(f'click {pos[0]} {pos[1]}')
+        return True
+    if code == e.BTN_RIGHT and (down_at is not None or activities_left_armed):
+        left_down = False
+        left_chord = True
+        if alt_held:
+            if ui:
+                vkey(e.KEY_TAB, 0)
+                vkey(e.KEY_LEFTALT, 0)
+            alt_held = False
+        last_click[e.BTN_RIGHT] = 0
+        if value == 1 and down_at is not None:
+            activities_combo_used = activities_left_armed = True
+            holding, manual = True, True
+            pending.pop(HOLD_KEY, None)
+            # Clicks may trigger Activities, but an already-visible overlay
+            # stays open until Button 5 is released.
+        elif value == 0 and activities_left_armed:
+            activities_left_armed = False
+            if down_at is not None:
+                now = time.time()
+                if activities_last_click is not None and now - activities_last_click <= WINDOW:
+                    activities_last_click = None
+                    # Release any active pointer grab before opening Activities,
+                    # then rearm capture for another double-click during this hold.
+                    left_capture.set_grab(False)
+                    left_capture.set_grab(True)
+                    toggle_activities()
+                else:
+                    activities_last_click = now
+        return True
+    if code == e.BTN_LEFT:
+        left_down = value == 1
+        if left_down:
+            left_chord = False
+        else:
+            if alt_held:
+                if ui:
+                    vkey(e.KEY_TAB, 0)
+                    vkey(e.KEY_LEFTALT, 0)
+                alt_held = False
+            if not left_chord:
+                t = time.time()
+                if t - last_click[e.BTN_LEFT] <= WINDOW:
+                    last_click[e.BTN_LEFT] = 0
+                    switch_workspace("left")
+                else:
+                    last_click[e.BTN_LEFT] = t
+        return True
+    if code == e.BTN_RIGHT:
+        if value == 1:
+            right_chord = left_down
+            if right_chord:
+                left_chord = True
+                if ui:
+                    if not alt_held:
+                        vkey(e.KEY_LEFTALT, 1)
+                        alt_held = True
+                    vkey(e.KEY_TAB, 1)
+        else:
+            if right_chord:
+                if ui:
+                    vkey(e.KEY_TAB, 0)
+            else:
+                t = time.time()
+                if t - last_click[e.BTN_RIGHT] <= WINDOW:
+                    last_click[e.BTN_RIGHT] = 0
+                    switch_workspace("right")
+                else:
+                    last_click[e.BTN_RIGHT] = t
+            right_chord = False
+        return True
+    return False
+
+# btn_down = {e.BTN_LEFT: None, e.BTN_RIGHT: None}  # chord state, disabled
+# chord = False
+while True:
+    devs = find_devices()
+    if not devs:
+        time.sleep(2); continue
+    try:
+        while True:
+            now = time.time()
+            dl = list(pending.values())
+            if down_at is not None and not holding: dl.append(down_at + HOLD_DELAY)
+            if holding and not manual: dl.append(next_step)
+            timeout = max(0, min(dl) - now) if dl else 5
+            ready, _, _ = select.select(devs, [], [], timeout)
+            for d in ready:
+                for ev in d.read():
+                    # Alt is pressed only once the actual left+right chord begins.
+                    if ev.type == e.EV_KEY and ev.value in (0, 1):
+                        if handle_mouse_button(ev.code, ev.value):
+                            continue
+                    # left + right click together (disabled, was Terminator split/open)
+                    # if ev.type == e.EV_KEY and ev.code in btn_down:
+                    #     if ev.value == 1:
+                    #         btn_down[ev.code] = time.time()
+                    #         other = e.BTN_RIGHT if ev.code == e.BTN_LEFT else e.BTN_LEFT
+                    #         if btn_down[other] is not None and btn_down[ev.code] - btn_down[other] <= CHORD:
+                    #             chord = True
+                    #     elif ev.value == 0:
+                    #         btn_down[ev.code] = None
+                    #         if chord and all(v is None for v in btn_down.values()):
+                    #             chord = False
+                    #             run(CHORD_CMD)             # both released: act
+                    #     continue
+                    # scroll wheel while holding: stop auto-stepping, GNOME handles the scroll
+                    if ev.type == e.EV_REL and ev.code == e.REL_WHEEL:
+                        if holding:
+                            manual = True
+                        continue
+                    code = BUTTON_ALIASES.get(ev.code, ev.code)
+                    if ev.type != e.EV_KEY or code not in ACTIONS or ev.value == 2:
+                        continue
+                    if code == HOLD_KEY:
+                        input_trace(f'button5-event raw={ev.code} value={ev.value}')
+                    elif code == e.KEY_F16:
+                        input_trace(f'button4-event raw={ev.code} value={ev.value}')
+                    if code == e.KEY_F3:
+                        if ev.value == 1:
+                            input_trace('button9-press')
+                            button9_down, button9_used = True, False
+                            button9_reopen_count = 0
+                            left_capture.set_grab(True)
+                            continue
+                        if ev.value == 0:
+                            input_trace('button9-release')
+                            button9_down = False
+                            if down_at is None:
+                                left_capture.set_grab(False)
+                            if button9_reopen_count:
+                                command = ['xdotool']
+                                for _ in range(button9_reopen_count):
+                                    command += ['sleep', '0.10', 'key', '--clearmodifiers', 'ctrl+shift+t']
+                                run(command)
+                                input_trace(f'button9-right reopen-tab dispatched count={button9_reopen_count}')
+                                button9_reopen_count = 0
+                            if button9_used:
+                                pending.pop(e.KEY_F3, None)
+                                continue
+                    # Button 7 sends Print Screen once on key-down.
+                    if code == e.KEY_F18:
+                        with open(os.path.join(lock_dir, 'mouse-keyboard-actions.log'), 'a') as log:
+                            log.write(f"{time.time():.3f} pid={os.getpid()} F18-event value={ev.value}\n")
+                        if ev.value == 1:
+                            run(ACTIONS[e.KEY_F18][0])
+                        continue
+                    if code == e.KEY_F16:
+                        if handle_windows_button(ev.value):
+                            continue
+                    if code == HOLD_KEY and ev.value == 1:
+                        activities_last_click = None
+                        activities_combo_used = False
+                        launcher_requested = False
+                        left_capture.set_grab(True)
+                        down_at = time.time()
+                        continue
+                    if code == HOLD_KEY and ev.value == 0:
+                        left_capture.set_grab(False)
+                        activities_last_click = None
+                        down_at = None
+                        launcher_finish(commit=True)
+                        if holding or activities_combo_used:
+                            holding = False
+                            hold_end()
+                            pending.pop(code, None)
+                            continue
+                    if ev.value == 0:
+                        if code in pending:
+                            del pending[code]; double_action(code)      # double tap
+                        else:
+                            pending[code] = time.time() + (WINDOWS_TAP_WINDOW if code == e.KEY_F16 else WINDOW)
+            now = time.time()
+            if down_at is not None and not holding and now >= down_at + HOLD_DELAY:
+                holding, manual = True, False
+                pending.pop(HOLD_KEY, None)
+                hold_start()
+                next_step = now + HOLD_RATE
+            elif holding and not manual and now >= next_step:
+                hold_step()
+                next_step = now + HOLD_RATE
+            for code, deadline in list(pending.items()):
+                if now >= deadline and not (code == HOLD_KEY and down_at is not None):
+                    if code == e.KEY_F16:
+                        windows_log('enable-keyboard-single-tap')
+                    del pending[code]
+                    if code == e.KEY_F16:
+                        set_keyboard(True, 'F16-enable')
+                    elif code == HOLD_KEY:
+                        set_keyboard(False, 'button5-single-tap')
+                    else:
+                        run(ACTIONS[code][0])                              # single tap
+            if not ready and not pending and not holding and down_at is None and not button9_down:
+                break
+    except OSError:
+        pass
+    finally:
+        left_capture.set_grab(False)
+        launcher_finish(commit=False)
+        launcher_requested = launcher_right = launcher_left_armed = False
+        activities_last_click = None
+        activities_left_armed = activities_combo_used = False
+        down_at = None
+        pending.pop(HOLD_KEY, None)
+        if holding:
+            holding = False
+            hold_end()
+        if alt_held:
+            alt_held = False
+            if ui:
+                vkey(e.KEY_TAB, 0)
+                vkey(e.KEY_LEFTALT, 0)
+        left_down = left_chord = right_chord = False
+        button9_down = button9_used = button9_left = button9_right = False
+        button9_reopen_count = 0
+        overlay_left_action = None
+        windows_second_press = False
+        for d in devs:
+            d.close()

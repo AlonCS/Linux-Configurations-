@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=mouseenter
+Exec=sh -c "while true; do $HOME/bin/mouseenter; sleep 1; done"

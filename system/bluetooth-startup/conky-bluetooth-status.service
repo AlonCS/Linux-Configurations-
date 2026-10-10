@@ -1,0 +1,27 @@
+[Unit]
+Description=Bluetooth connection progress for Lonzo's overlay
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/libexec/conky-bt-supervisor.py
+Restart=always
+RestartSec=3
+User=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/lonzo/.cache /tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

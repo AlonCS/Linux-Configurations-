@@ -1,0 +1,50 @@
+#!/usr/bin/python3
+"""Stop duplicate mouse supervisors and launch exactly one supervised handler."""
+import os
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+def mouse_processes():
+    output = subprocess.run(['ps', '-u', str(os.getuid()), '-o', 'pid=,args='],
+                            capture_output=True, text=True, check=True).stdout
+    supervisors, handlers = [], []
+    for line in output.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2:
+            continue
+        pid, args = int(fields[0]), fields[1]
+        if 'while true; do' in args and ('/bin/mouseenter' in args or '$HOME/bin/mouseenter' in args):
+            supervisors.append(pid)
+        elif args.split() in (["python3", "/home/lonzo/bin/mouseenter"],
+                              ["/usr/bin/python3", "/home/lonzo/bin/mouseenter"]):
+            handlers.append(pid)
+    return supervisors, handlers
+
+def stop(pids):
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+supervisors, handlers = mouse_processes()
+stop(supervisors)
+time.sleep(0.2)
+# Rescan after stopping the loops so a just-restarted child is also stopped.
+stop(mouse_processes()[1])
+time.sleep(0.5)
+if any(mouse_processes()):
+    raise SystemExit('A mouse process is still stopping; run this reset again in a moment.')
+log = Path.home() / '.cache/mouseenter.log'
+log.parent.mkdir(parents=True, exist_ok=True)
+with log.open('a') as stream:
+    subprocess.Popen(['/usr/bin/sh', '-c',
+                      'while true; do /usr/bin/python3 /home/lonzo/bin/mouseenter; sleep 1; done'],
+                     stdout=stream, stderr=stream, start_new_session=True)
+time.sleep(1)
+supervisors, handlers = mouse_processes()
+if len(supervisors) != 1 or len(handlers) != 1:
+    raise SystemExit(f'Expected one supervisor and handler; found {len(supervisors)} and {len(handlers)}. See {log}')
+print('Mouse controls reset: exactly one supervisor and one handler running.')
