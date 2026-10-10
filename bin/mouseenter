@@ -263,47 +263,9 @@ def hold_end():
         overlay_proc = None
 
 def close_application_windows():
-    # Snapshot normal application windows first. Never close newly opened
-    # save/confirmation dialogs and never send force-kill signals.
-    listing = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
-    targets = []
-    for line in listing.stdout.splitlines():
-        parts = line.split(None, 4)
-        if len(parts) < 3 or not re.fullmatch(r'0x[0-9a-fA-F]+', parts[0]):
-            continue
-        window_id, window_class = parts[0], parts[2].lower()
-        if 'conky' in window_class or 'mousepinnedlauncher' in window_class or 'mouse-pinned-launcher' in window_class:
-            continue
-        kind = subprocess.run(['xprop', '-id', window_id, '_NET_WM_WINDOW_TYPE'],
-                              capture_output=True, text=True)
-        if kind.returncode or '_NET_WM_WINDOW_TYPE_NORMAL' not in kind.stdout or '_NET_WM_WINDOW_TYPE_DIALOG' in kind.stdout:
-            continue
-        targets.append(window_id)
-    time.sleep(0.10)
-    requested = 0
-    for window_id in targets:
-        # Send one normal close request, then wait for that window to disappear.
-        # A browser before-unload prompt keeps the window open: never send
-        # another request or advance to another window of the same application.
-        result = subprocess.run(['wmctrl', '-ic', window_id],
-                                capture_output=True, text=True)
-        if result.returncode:
-            continue
-        requested += 1
-        deadline = time.monotonic() + 2.0
-        while True:
-            current = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
-            remaining = {int(line.split()[0], 16) for line in current.stdout.splitlines()
-                         if line.split() and re.fullmatch(r'0x[0-9a-fA-F]+', line.split()[0])}
-            if current.returncode:
-                return
-            if int(window_id, 16) not in remaining:
-                break
-            if time.monotonic() >= deadline:
-                input_trace('button9-middle close-applications stopped: window still open; awaiting user')
-                return
-            time.sleep(0.10)
-    input_trace(f'button9-middle close-applications requested count={requested}')
+    # Disabled: applications can discard unsaved work on normal close requests.
+    input_trace('button9-middle close-applications disabled: preserve unsaved work')
+
 
 def quick_switch():
     w = recent_windows()
