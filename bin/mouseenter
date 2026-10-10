@@ -265,6 +265,16 @@ def hold_end():
 # Windows that ignored a close request are protected until they disappear.
 close_protected_windows = {}
 
+def chrome_close_state():
+    try:
+        result = subprocess.run(
+            ['/usr/bin/python3', os.path.expanduser('~/.local/share/mouse-pinned-launcher/chrome-close-state.py')],
+            capture_output=True, text=True, timeout=2)
+        state = result.stdout.strip()
+        return state if result.returncode == 0 and state in ('clear', 'blocked') else 'unknown'
+    except (OSError, subprocess.TimeoutExpired):
+        return 'unknown'
+
 def close_application_windows():
     listing = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
     if listing.returncode:
@@ -277,9 +287,18 @@ def close_application_windows():
     for wid in list(close_protected_windows):
         if wid not in windows:
             del close_protected_windows[wid]
+    # Chrome may retry only when its native accessibility tree confirms no dialog.
+    chrome_state = chrome_close_state() if any('chrome' in c for _, c in windows.values()) else 'unknown'
+    if chrome_state == 'clear':
+        for wid, cls in list(close_protected_windows.items()):
+            if 'chrome' in cls:
+                del close_protected_windows[wid]
     blocked_classes = set(close_protected_windows.values())
     requested = 0
     for wid, (window_id, window_class) in windows.items():
+        if 'chrome' in window_class and chrome_close_state() != 'clear':
+            input_trace('close-all skipped Chrome: dialog open or accessibility unavailable')
+            continue
         if wid in close_protected_windows or window_class in blocked_classes:
             continue
         if any(name in window_class for name in ('conky', 'mousepinnedlauncher', 'mouse-pinned-launcher')):
